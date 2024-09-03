@@ -1,0 +1,52 @@
+dependencies:
+  button:
+    dependencies: []
+    source:
+      path: C:\Users\mail\esp\v5.3\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\button
+      type: local
+    version: '*'
+  espressif/ds18b20:
+    component_hash: d676429d9f1f686b65ed895e418eb4b331477bcd5d63c27f43dc3d6a2de8f13b
+    dependencies:
+    - name: espressif/onewire_bus
+      registry_url: https://components.espressif.com/
+      require: private
+      version: ^1.0.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.1
+  espressif/onewire_bus:
+    component_hash: c4c781940d8bd988432b47ac3ee68479c69e14e01fdfba0b61365b233a3ba5d6
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.2
+  example_init:
+    dependencies: []
+    source:
+      path: C:\Users\mail\esp\v5.3\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\example_init
+      type: local
+    version: '*'
+  example_nvs:
+    dependencies: []
+    source:
+      path: C:\Users\mail\esp\v5.3\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\example_nvs
+      type: local
+    version: '*'
+  idf:
+    source:
+      type: idf
+    version: 5.3.0
+direct_dependencies:
+- button
+- espressif/ds18b20
+- example_init
+- example_nvs
+manifest_hash: ff69f538e4fa1537971182e50bfecdb5c00d0207bed31bb270196b0fb5b0429c
+target: esp32s3
+version: 2.0.0
