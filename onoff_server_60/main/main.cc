@@ -1,0 +1,472 @@
+/* main.c - Application main entry point */
+
+/*
+ * SPDX-FileCopyrightText: 2017 Intel Corporation
+ * SPDX-FileContributor: 2018-2021 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+
+#include "esp_log.h"
+#include "nvs_flash.h"
+
+
+#include <sdkconfig.h>
+
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_bt_device.h"
+
+
+#include "esp_ble_mesh_defs.h"
+#include "esp_ble_mesh_common_api.h"
+#include "esp_ble_mesh_networking_api.h"
+#include "esp_ble_mesh_provisioning_api.h"
+#include "esp_ble_mesh_config_model_api.h"
+#include "esp_ble_mesh_generic_model_api.h"
+#include "esp_ble_mesh_local_data_operation_api.h"
+#include "esp_ble_mesh_health_model_api.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "board.hh"
+
+
+#define TAG "EXAMPLE"
+
+#define CID_ESP 0x02E5
+
+
+static uint8_t dev_uuid[16] = { 0xdd, 0xdd };
+
+static esp_ble_mesh_cfg_srv_t config_server = {
+    /* 3 transmissions with 20ms interval */
+    .net_transmit = ESP_BLE_MESH_TRANSMIT(2, 20),
+    .relay = ESP_BLE_MESH_RELAY_DISABLED,
+    .relay_retransmit = ESP_BLE_MESH_TRANSMIT(2, 20),
+    .beacon = ESP_BLE_MESH_BEACON_ENABLED,
+#if defined(CONFIG_BLE_MESH_GATT_PROXY_SERVER)
+    .gatt_proxy = ESP_BLE_MESH_GATT_PROXY_ENABLED,
+#else
+    .gatt_proxy = ESP_BLE_MESH_GATT_PROXY_NOT_SUPPORTED,
+#endif
+#if defined(CONFIG_BLE_MESH_FRIEND)
+    .friend_state = ESP_BLE_MESH_FRIEND_ENABLED,
+#else
+    .friend_state = ESP_BLE_MESH_FRIEND_NOT_SUPPORTED,
+#endif
+    .default_ttl = 7,
+};
+
+ESP_BLE_MESH_MODEL_PUB_DEFINE(onoff_pub_0, 2 + 3, ROLE_NODE);
+static esp_ble_mesh_gen_onoff_srv_t onoff_server_0 = {
+    .rsp_ctrl = {
+        .get_auto_rsp = ESP_BLE_MESH_SERVER_AUTO_RSP,
+        .set_auto_rsp = ESP_BLE_MESH_SERVER_AUTO_RSP,
+    },
+};
+
+ESP_BLE_MESH_MODEL_PUB_DEFINE(onoff_pub_1, 2 + 3, ROLE_NODE);
+static esp_ble_mesh_gen_onoff_srv_t onoff_server_1 = {
+    .rsp_ctrl = {
+        .get_auto_rsp = ESP_BLE_MESH_SERVER_RSP_BY_APP,
+        .set_auto_rsp = ESP_BLE_MESH_SERVER_RSP_BY_APP,
+    },
+};
+
+ESP_BLE_MESH_MODEL_PUB_DEFINE(onoff_pub_2, 2 + 3, ROLE_NODE);
+static esp_ble_mesh_gen_onoff_srv_t onoff_server_2 = {
+    .rsp_ctrl = {
+        .get_auto_rsp = ESP_BLE_MESH_SERVER_AUTO_RSP,
+        .set_auto_rsp = ESP_BLE_MESH_SERVER_RSP_BY_APP,
+    },
+};
+
+/* Health test ID for the Health Server Model */
+static const uint8_t health_test_ids[] = { ESP_BLE_MESH_HEALTH_STANDARD_TEST };
+
+ESP_BLE_MESH_HEALTH_PUB_DEFINE(health_pub, 0, ROLE_NODE);
+static esp_ble_mesh_health_srv_t health_server = {
+    .health_test = {
+        .id_count = 1,
+        .test_ids = health_test_ids,
+        .company_id = CID_ESP,
+    },
+};
+
+static esp_ble_mesh_model_t root_models[] = {
+    ESP_BLE_MESH_MODEL_CFG_SRV(&config_server),
+    ESP_BLE_MESH_MODEL_HEALTH_SRV(&health_server, &health_pub),
+    ESP_BLE_MESH_MODEL_GEN_ONOFF_SRV(&onoff_pub_0, &onoff_server_0),
+};
+
+static esp_ble_mesh_model_t extend_model_0[] = {
+    ESP_BLE_MESH_MODEL_GEN_ONOFF_SRV(&onoff_pub_1, &onoff_server_1),
+};
+
+static esp_ble_mesh_model_t extend_model_1[] = {
+    ESP_BLE_MESH_MODEL_GEN_ONOFF_SRV(&onoff_pub_2, &onoff_server_2),
+};
+
+static esp_ble_mesh_elem_t elements[] = {
+    ESP_BLE_MESH_ELEMENT(0, root_models, ESP_BLE_MESH_MODEL_NONE),
+    ESP_BLE_MESH_ELEMENT(0, extend_model_0, ESP_BLE_MESH_MODEL_NONE),
+    ESP_BLE_MESH_ELEMENT(0, extend_model_1, ESP_BLE_MESH_MODEL_NONE),
+};
+
+static esp_ble_mesh_comp_t composition = {
+    .cid = CID_ESP,
+    .element_count = ARRAY_SIZE(elements),
+    .elements = elements,
+};
+
+/* Disable OOB security for SILabs Android app */
+static esp_ble_mesh_prov_t provision = {
+    .uuid = dev_uuid,
+#if 0
+    .output_size = 4,
+    .output_actions = ESP_BLE_MESH_DISPLAY_NUMBER,
+    .input_size = 4,
+    .input_actions = ESP_BLE_MESH_PUSH,
+#else
+    .output_size = 0,
+    .output_actions = 0,
+#endif
+};
+
+void ble_mesh_get_dev_uuid(uint8_t *dev_uuid)
+{
+    if (dev_uuid == NULL) {
+        ESP_LOGE(TAG, "%s, Invalid device uuid", __func__);
+        return;
+    }
+
+    /* Copy device address to the device uuid with offset equals to 2 here.
+     * The first two bytes is used for matching device uuid by Provisioner.
+     * And using device address here is to avoid using the same device uuid
+     * by different unprovisioned devices.
+     */
+    memcpy(dev_uuid + 2, esp_bt_dev_get_address(), BD_ADDR_LEN);
+}
+
+static void prov_complete(uint16_t net_idx, uint16_t addr, uint8_t flags, uint32_t iv_index)
+{
+    ESP_LOGI(TAG, "net_idx: 0x%04x, addr: 0x%04x", net_idx, addr);
+    ESP_LOGI(TAG, "flags: 0x%02x, iv_index: 0x%08" PRIx32, flags, iv_index);
+    board_led_operation(LED_G, LED_OFF);
+}
+
+static void example_change_led_state(esp_ble_mesh_model_t *model,
+                                     esp_ble_mesh_msg_ctx_t *ctx, uint8_t onoff)
+{
+    uint16_t primary_addr = esp_ble_mesh_get_primary_element_address();
+    uint8_t elem_count = esp_ble_mesh_get_element_count();
+    uint8_t i;
+
+    if (ESP_BLE_MESH_ADDR_IS_UNICAST(ctx->recv_dst)) {
+        for (i = 0; i < elem_count; i++) {
+            if (ctx->recv_dst == (primary_addr + i)) {
+                //led = &led_state[i];
+                board_led_operation(i, onoff);
+            }
+        }
+    } else if (ESP_BLE_MESH_ADDR_IS_GROUP(ctx->recv_dst)) {
+        if (esp_ble_mesh_is_model_subscribed_to_group(model, ctx->recv_dst)) {
+            //led = &led_state[model->element->element_addr - primary_addr];
+            board_led_operation(model->element->element_addr - primary_addr, onoff);
+        }
+    } else if (ctx->recv_dst == 0xFFFF) {
+        //led = &led_state[model->element->element_addr - primary_addr];
+        board_led_operation(model->element->element_addr - primary_addr, onoff);
+    }
+}
+
+static void example_handle_gen_onoff_msg(esp_ble_mesh_model_t *model,
+                                         esp_ble_mesh_msg_ctx_t *ctx,
+                                         esp_ble_mesh_server_recv_gen_onoff_set_t *set)
+{
+    esp_ble_mesh_gen_onoff_srv_t *srv = (esp_ble_mesh_gen_onoff_srv_t *)model->user_data;
+
+    switch (ctx->recv_op) {
+    case ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_GET:
+        esp_ble_mesh_server_model_send_msg(model, ctx,
+            ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_STATUS, sizeof(srv->state.onoff), &srv->state.onoff);
+        break;
+    case ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET:
+    case ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET_UNACK:
+        if (set->op_en == false) {
+            srv->state.onoff = set->onoff;
+        } else {
+            /* TODO: Delay and state transition */
+            srv->state.onoff = set->onoff;
+        }
+        if (ctx->recv_op == ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET) {
+            esp_ble_mesh_server_model_send_msg(model, ctx,
+                ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_STATUS, sizeof(srv->state.onoff), &srv->state.onoff);
+        }
+        esp_ble_mesh_model_publish(model, ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_STATUS,
+            sizeof(srv->state.onoff), &srv->state.onoff, ROLE_NODE);
+        example_change_led_state(model, ctx, srv->state.onoff);
+        break;
+    default:
+        break;
+    }
+}
+
+static void example_ble_mesh_provisioning_cb(esp_ble_mesh_prov_cb_event_t event,
+                                             esp_ble_mesh_prov_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_BLE_MESH_PROV_REGISTER_COMP_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_PROV_REGISTER_COMP_EVT, err_code %d", param->prov_register_comp.err_code);
+        break;
+    case ESP_BLE_MESH_NODE_PROV_ENABLE_COMP_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_NODE_PROV_ENABLE_COMP_EVT, err_code %d", param->node_prov_enable_comp.err_code);
+        break;
+    case ESP_BLE_MESH_NODE_PROV_LINK_OPEN_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_NODE_PROV_LINK_OPEN_EVT, bearer %s",
+            param->node_prov_link_open.bearer == ESP_BLE_MESH_PROV_ADV ? "PB-ADV" : "PB-GATT");
+        break;
+    case ESP_BLE_MESH_NODE_PROV_LINK_CLOSE_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_NODE_PROV_LINK_CLOSE_EVT, bearer %s",
+            param->node_prov_link_close.bearer == ESP_BLE_MESH_PROV_ADV ? "PB-ADV" : "PB-GATT");
+        break;
+    case ESP_BLE_MESH_NODE_PROV_COMPLETE_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_NODE_PROV_COMPLETE_EVT");
+        prov_complete(param->node_prov_complete.net_idx, param->node_prov_complete.addr,
+            param->node_prov_complete.flags, param->node_prov_complete.iv_index);
+        break;
+    case ESP_BLE_MESH_NODE_PROV_RESET_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_NODE_PROV_RESET_EVT");
+        break;
+    case ESP_BLE_MESH_NODE_SET_UNPROV_DEV_NAME_COMP_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_NODE_SET_UNPROV_DEV_NAME_COMP_EVT, err_code %d", param->node_set_unprov_dev_name_comp.err_code);
+        break;
+    default:
+        break;
+    }
+}
+
+static void example_ble_mesh_generic_server_cb(esp_ble_mesh_generic_server_cb_event_t event,
+                                               esp_ble_mesh_generic_server_cb_param_t *param)
+{
+    esp_ble_mesh_gen_onoff_srv_t *srv;
+    ESP_LOGI(TAG, "event 0x%02x, opcode 0x%04" PRIx32 ", src 0x%04x, dst 0x%04x",
+        event, param->ctx.recv_op, param->ctx.addr, param->ctx.recv_dst);
+
+    switch (event) {
+    case ESP_BLE_MESH_GENERIC_SERVER_STATE_CHANGE_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_GENERIC_SERVER_STATE_CHANGE_EVT");
+        if (param->ctx.recv_op == ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET ||
+            param->ctx.recv_op == ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET_UNACK) {
+            ESP_LOGI(TAG, "onoff 0x%02x", param->value.state_change.onoff_set.onoff);
+            example_change_led_state(param->model, &param->ctx, param->value.state_change.onoff_set.onoff);
+        }
+        break;
+    case ESP_BLE_MESH_GENERIC_SERVER_RECV_GET_MSG_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_GENERIC_SERVER_RECV_GET_MSG_EVT");
+        if (param->ctx.recv_op == ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_GET) {
+            srv = (esp_ble_mesh_gen_onoff_srv_t *)param->model->user_data;
+            ESP_LOGI(TAG, "onoff 0x%02x", srv->state.onoff);
+            example_handle_gen_onoff_msg(param->model, &param->ctx, NULL);
+        }
+        break;
+    case ESP_BLE_MESH_GENERIC_SERVER_RECV_SET_MSG_EVT:
+        ESP_LOGI(TAG, "ESP_BLE_MESH_GENERIC_SERVER_RECV_SET_MSG_EVT");
+        if (param->ctx.recv_op == ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET ||
+            param->ctx.recv_op == ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET_UNACK) {
+            ESP_LOGI(TAG, "onoff 0x%02x, tid 0x%02x", param->value.set.onoff.onoff, param->value.set.onoff.tid);
+            if (param->value.set.onoff.op_en) {
+                ESP_LOGI(TAG, "trans_time 0x%02x, delay 0x%02x",
+                    param->value.set.onoff.trans_time, param->value.set.onoff.delay);
+            }
+            example_handle_gen_onoff_msg(param->model, &param->ctx, &param->value.set.onoff);
+        }
+        break;
+    default:
+        ESP_LOGE(TAG, "Unknown Generic Server event 0x%02x", event);
+        break;
+    }
+}
+
+static void example_ble_mesh_health_server_cb(esp_ble_mesh_health_server_cb_event_t event,
+                                              esp_ble_mesh_health_server_cb_param_t *param)
+{
+    if (event == ESP_BLE_MESH_HEALTH_SERVER_ATTENTION_ON_EVT) {
+        ESP_LOGI(TAG, "Health Attention ON (%ds) - blinking red LED",
+                 param->attention_on.time);
+        /* Blink red LED in a one-shot task for the given attention duration */
+        xTaskCreate([](void *arg) {
+            uint8_t seconds = (uint8_t)(uintptr_t)arg;
+            uint32_t blinks = (uint32_t)seconds * 2; /* 2 blinks per second */
+            for (uint32_t i = 0; i < blinks; i++) {
+                board_led_operation(LED_R, LED_ON);
+                vTaskDelay(pdMS_TO_TICKS(250));
+                board_led_operation(LED_R, LED_OFF);
+                vTaskDelay(pdMS_TO_TICKS(250));
+            }
+            vTaskDelete(nullptr);
+        }, "identify_blink", 2048, (void *)(uintptr_t)param->attention_on.time, 5, nullptr);
+    } else if (event == ESP_BLE_MESH_HEALTH_SERVER_ATTENTION_OFF_EVT) {
+        ESP_LOGI(TAG, "Health Attention OFF");
+        board_led_operation(LED_R, LED_OFF);
+    }
+}
+
+static void example_ble_mesh_config_server_cb(esp_ble_mesh_cfg_server_cb_event_t event,
+                                              esp_ble_mesh_cfg_server_cb_param_t *param)
+{
+    if (event == ESP_BLE_MESH_CFG_SERVER_STATE_CHANGE_EVT) {
+        switch (param->ctx.recv_op) {
+        case ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD:
+            ESP_LOGI(TAG, "ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD");
+            ESP_LOGI(TAG, "net_idx 0x%04x, app_idx 0x%04x",
+                param->value.state_change.appkey_add.net_idx,
+                param->value.state_change.appkey_add.app_idx);
+            ESP_LOG_BUFFER_HEX("AppKey", param->value.state_change.appkey_add.app_key, 16);
+            break;
+        case ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND:
+            ESP_LOGI(TAG, "ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND");
+            ESP_LOGI(TAG, "elem_addr 0x%04x, app_idx 0x%04x, cid 0x%04x, mod_id 0x%04x",
+                param->value.state_change.mod_app_bind.element_addr,
+                param->value.state_change.mod_app_bind.app_idx,
+                param->value.state_change.mod_app_bind.company_id,
+                param->value.state_change.mod_app_bind.model_id);
+            break;
+        case ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD:
+            ESP_LOGI(TAG, "ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD");
+            ESP_LOGI(TAG, "elem_addr 0x%04x, sub_addr 0x%04x, cid 0x%04x, mod_id 0x%04x",
+                param->value.state_change.mod_sub_add.element_addr,
+                param->value.state_change.mod_sub_add.sub_addr,
+                param->value.state_change.mod_sub_add.company_id,
+                param->value.state_change.mod_sub_add.model_id);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static esp_err_t ble_mesh_init(void)
+{
+    esp_err_t err = ESP_OK;
+
+    esp_ble_mesh_register_prov_callback(example_ble_mesh_provisioning_cb);
+    esp_ble_mesh_register_config_server_callback(example_ble_mesh_config_server_cb);
+    esp_ble_mesh_register_generic_server_callback(example_ble_mesh_generic_server_cb);
+    esp_ble_mesh_register_health_server_callback(example_ble_mesh_health_server_cb);
+
+    err = esp_ble_mesh_init(&provision, &composition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize mesh stack (err %d)", err);
+        return err;
+    }
+
+    esp_ble_mesh_set_unprovisioned_device_name("LieblersLuminator");
+
+    err = esp_ble_mesh_node_prov_enable((esp_ble_mesh_prov_bearer_t)(ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable mesh node (err %d)", err);
+        return err;
+    }
+
+    ESP_LOGI(TAG, "BLE Mesh Node initialized");
+
+    /* Debug: Log the composition data */
+    ESP_LOGI(TAG, "Composition: %d elements, CID 0x%04x, PID 0x%04x",
+             composition.element_count, composition.cid, composition.pid);
+    
+    for (uint8_t i = 0; i < composition.element_count; i++) {
+        esp_ble_mesh_elem_t *elem = &composition.elements[i];
+        ESP_LOGI(TAG, "  Element %d: %d SIG models, %d vendor models", i, 
+                 elem->sig_model_count, elem->vnd_model_count);
+        
+        if (elem->sig_model_count) {
+            for (int j = 0; j < elem->sig_model_count; j++) {
+                ESP_LOGI(TAG, "    SIG Model[%d]: 0x%04x", j, elem->sig_models[j].model_id);
+            }
+        }
+        if (elem->vnd_model_count) {
+            for (int j = 0; j < elem->vnd_model_count; j++) {
+                ESP_LOGI(TAG, "    Vendor Model[%d]: MID 0x%04x", j, elem->vnd_models[j].model_id);
+            }
+        }
+    }
+
+    board_led_operation(LED_G, LED_ON);
+
+    return err;
+}
+
+esp_err_t bluetooth_init(void)
+{
+    esp_err_t ret;
+
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        ESP_LOGE(TAG, "%s initialize controller failed", __func__);
+        return ret;
+    }
+
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret) {
+        ESP_LOGE(TAG, "%s enable controller failed", __func__);
+        return ret;
+    }
+
+    esp_bluedroid_config_t cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+    ret = esp_bluedroid_init_with_cfg(&cfg);
+    if (ret) {
+        ESP_LOGE(TAG, "%s init bluetooth failed", __func__);
+        return ret;
+    }
+    ret = esp_bluedroid_enable();
+    if (ret) {
+        ESP_LOGE(TAG, "%s enable bluetooth failed", __func__);
+        return ret;
+    }
+
+    return ret;
+}
+
+extern "C" void app_main(void)
+{
+    esp_err_t err;
+
+    ESP_LOGI(TAG, "Initializing...");
+
+    board_init();
+
+    err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    err = bluetooth_init();
+    if (err) {
+        ESP_LOGE(TAG, "esp32_bluetooth_init failed (err %d)", err);
+        return;
+    }
+
+    ble_mesh_get_dev_uuid(dev_uuid);
+
+    /* Initialize the Bluetooth Mesh Subsystem */
+    err = ble_mesh_init();
+    if (err) {
+        ESP_LOGE(TAG, "Bluetooth mesh init failed (err %d)", err);
+    }
+}
+#pragma GCC diagnostic pop

@@ -1,10 +1,4 @@
 dependencies:
-  button:
-    dependencies: []
-    source:
-      path: ..\..\..\esp\v6.0\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\button
-      type: local
-    version: '*'
   espressif/ds18b20:
     component_hash: 87a753636db56dbb42633b8fdd615c63c5e752ec9c9629e6386d8115f36efc30
     dependencies:
@@ -32,22 +26,14 @@ dependencies:
       path: ..\..\..\esp\v6.0\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\example_init
       type: local
     version: '*'
-  example_nvs:
-    dependencies: []
-    source:
-      path: ..\..\..\esp\v6.0\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\example_nvs
-      type: local
-    version: '*'
   idf:
     source:
       type: idf
     version: 6.0.0
 direct_dependencies:
-- button
 - espressif/ds18b20
 - espressif/onewire_bus
 - example_init
-- example_nvs
-manifest_hash: 064118f093b32f4520875519a269579ec91286afd3454a049ac31df3e099b859
+manifest_hash: 3b754e83e0a6e87eec73f37c1ebf631d92a532fabd4ee1fc408ff3106616cec3
 target: esp32s3
 version: 3.0.0
